@@ -1,0 +1,10 @@
+name = "geet"
+version = "0.1.0"
+defaultTargets = ["geet"]
+
+[[lean_lib]]
+name = "Geet"
+
+[[lean_exe]]
+name = "geet"
+root = "Main"
