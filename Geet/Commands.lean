@@ -4,7 +4,7 @@ open Lean
 namespace Init
 def geetDir : String := ".geet"
 def objDir : String := ".geet/objects"
-def maxDepth : Nat := 10
+def maxDepth : Nat := 10 -- TODO: make this customisable from some .env file
 
 open System
 
@@ -29,9 +29,11 @@ where
       else pure .none
 
 protected def addObjDir (fp : FilePath) : IO Unit := do
-  let exists? ← (FilePath.isDir ∘ flip Init.pushDir objDir $ fp).toIO
-  unless exists? do
-    Log.info "created .geet/objects directory."; Init.addDir fp objDir
+  let .false ← (FilePath.isDir ∘ flip Init.pushDir objDir $ fp).toIO
+    | pure ()
+
+  Init.addDir fp objDir;
+  Log.info "created .geet/objects directory."
 
 protected def addGeetDir : IO FilePath := do
   let exists? ← Init.geetDirExists?;
@@ -52,41 +54,61 @@ namespace Hash
 
 open System
 
-private inductive Obj where
+inductive Obj where
   | blob
-  deriving BEq
+  | any -- we don't care what the obj type is here
+
+instance : BEq Obj where
+  beq : Obj → Obj → Bool
+    | .blob, .blob => true
+    | .any, _ | _, .any => true
+
+instance : ToString Obj where
+  toString : Obj → String
+    | .blob => "blob"
+    | .any => "any"
+
+private def Obj.ofString : String → Obj
+  | "blob" => .blob
+  | _ => .any
 
 private def Obj.toBytes : Obj → ByteArray
-  | .blob => "blob".toByteArray
+  | .blob => "blob\x00".toByteArray
+  | .any => .empty
 
 private def Obj.byteLength : Obj → Nat
-  | .blob => 4
+  | .blob => 5 -- we ensure to account for the null byte
+  | .any => 0
 
-private def strip (o : Obj) (b : ByteArray) : ByteArray :=
-  .mk (b.data.drop $ Obj.byteLength o)
+-- strip the object prefix from an object file.
+private def strip (b : ByteArray) : Obj × ByteArray :=
+  let obj := Obj.ofString ∘ String.fromUTF8! ∘ List.toByteArray $ b.toList.takeWhile (· != 0)
+  (obj, .mk (b.data.drop $ Obj.byteLength obj))
 
 private def hashStr : String → String :=
   BitVec.toHex ∘ UInt64.toBitVec ∘ String.hash
 
-protected def makeObj (fname : String) : IO Unit := do
+protected def makeObjFile (obj : Obj) (fname : String) : IO Unit := do
   let .some dir ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
   let fc ← IO.FS.readFile s!"{dir}/{fname}";
   let obj_fn := hashStr fc;
-  let fc := Obj.blob.toBytes ++ fc.toByteArray;
+  let fc := obj.toBytes ++ fc.toByteArray;
   IO.FS.writeBinFile s!"{dir}/{Init.objDir}/{obj_fn}" fc
   IO.println obj_fn
 
-protected def catObj (hash_fn : String) : IO Unit := do
-  let .some dir ← Init.geetDirExists?
-    | Log.err "failed to find .geet directory"
+protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
+    let .some dir ← Init.geetDirExists?
+      | Log.err "failed to find .geet directory"
 
-  let dir := s!"{Init.pushDir dir Init.objDir}/{hash_fn}";
-  let .true ← (FilePath.pathExists dir).toIO
-    | Log.err "failed to find file."
+    let dir := s!"{Init.pushDir dir Init.objDir}/{hash_fn}";
+    let .true ← (FilePath.pathExists dir).toIO
+      | Log.err "failed to find file."
 
-  let fc ← IO.FS.readBinFile dir;
-  IO.println ∘ String.fromUTF8! $ strip .blob fc
+    let (obj', fc) := strip (← IO.FS.readBinFile dir)
+    if obj == obj'
+    then IO.println $ String.fromUTF8! fc
+    else Log.err "expected a(n) {obj} file, but got a(n) {obj'} file."
 
 end Hash

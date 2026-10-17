@@ -2,8 +2,8 @@ import Geet
 
 def process_cmd : List String → IO Unit
   | "init" :: _ => Init.init
-  | "hash-obj" :: fname :: _ => Hash.makeObj fname
-  | "cat-file" :: fname :: _ => Hash.catObj fname
+  | "hash-obj" :: fname :: _ => Hash.makeObjFile Hash.Obj.blob fname
+  | "cat-obj" :: fname :: _ => Hash.catFile Hash.Obj.blob fname
   | _ => pure ()
 
 def main (args : List String) : IO Unit := do
