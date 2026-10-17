@@ -54,12 +54,13 @@ namespace Hash
 
 open System
 
-private def ignorableFiles := [".geet", ".DS_Store", "thumbs.db", "desktop.ini"]
+private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db", "desktop.ini"]
 
 inductive Obj where
-  | blob : Obj
-  | tree : Obj
-  | any  : Obj -- we don't care what the obj type is here
+  | blob
+  | tree
+  | any -- we don't care what the obj type is here
+  deriving Inhabited
 
 instance : BEq Obj where
   beq : Obj → Obj → Bool
@@ -117,11 +118,11 @@ protected def hashBlob (fname : String) (fp : Option FilePath := .none): IO Stri
   let fc ← IO.FS.readFile fp;
   makeObjFile .blob dir fc
 
-protected partial def hashTree (prev : String) (dir : String) : IO String := do
+protected partial def hashTree (dir : FilePath) : IO String := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"; pure ""
 
-  let entries := (← FilePath.readDir s!"{prev}/{dir}").toList;
+  let entries := (← FilePath.readDir dir).toList;
   let hashed ← handleEntries entries []
   makeObjFile .tree geet (entriesToContent hashed)
 where
@@ -131,18 +132,20 @@ where
       if List.elem e.fileName ignorableFiles
       then handleEntries es acc
       else
-        let edir := Init.pushDir e.root e.fileName
+        let edir := e.path
         let isDir? ← edir.isDir.toIO
         if not isDir?
         then do
           let hash ← Hash.hashBlob "" (fp := .some edir)
           handleEntries es ((.blob, e.fileName, hash) :: acc)
         else do
-          let hash ← Hash.hashTree e.root.toString e.fileName
+          let hash ← Hash.hashTree edir
           handleEntries es ((.tree, e.fileName, hash) :: acc)
 
-  entriesToContent : List (Obj × String × String) → String :=
-    List.foldl (λ acc (obj, fn, hash) => acc ++ s!"{obj} {hash} {fn}\n") ""
+  entriesToContent : List (Obj × String × String) → String
+    | [] => ""
+    | [(obj, fn, hash)] => s!"{obj} {hash} {fn}"
+    | (obj, fn, hash) :: es => s!"{obj} {hash} {fn}\n" ++ entriesToContent es
 
 protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
   let .some dir ← Init.geetDirExists?
@@ -156,5 +159,36 @@ protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
   if obj == obj'
   then IO.println $ String.fromUTF8! fc
   else Log.err "expected a(n) {obj} file, but got a(n) {obj'} file."
+
+protected partial def readTree (curr : FilePath) (treeHash : String) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory."
+  let obj_dir := Init.pushDir geet Init.objDir
+
+  let dir := s!"{obj_dir}/{treeHash}"
+  let .true ← (FilePath.pathExists dir).toIO
+    | Log.err s!"failed to find file {dir}."
+
+  let (obj, fc) := strip (← IO.FS.readBinFile dir)
+  unless obj == .tree do Log.err s!"expected a tree hash, but got a {obj} hash."
+
+  let (blobs, trees) := List.partition (·.fst == .blob) ∘ parseFC $ String.fromUTF8! fc
+  writeBlobs obj_dir curr (blobs.map (·.snd))
+
+  for (_, hash, dirname) in trees do
+    Hash.readTree s!"{curr}/{dirname}" hash
+where
+  parseFC (fc : String) : List (Obj × String × String) :=
+    (fc.splitOn (sep := "\n")).map
+      (match String.splitOn · with
+        | [obj, hash, fn] => (Obj.ofString obj, hash, fn)
+        | _ => unreachable!)
+
+  writeBlobs : FilePath → FilePath → List (String × String) → IO Unit
+    | _, _, [] => pure ()
+    | odir, curr, (hash, filename) :: blobs => do
+      let (_, fc) := strip (← IO.FS.readBinFile s!"{odir}/{hash}")
+      IO.FS.writeBinFile s!"{curr}/{filename}" fc;
+      writeBlobs odir curr blobs
 
 end Hash
