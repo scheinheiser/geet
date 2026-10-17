@@ -2,17 +2,14 @@ import Geet.Log
 open Lean
 
 namespace Init
+open System
+
 def geetDir : String := ".geet"
 def objDir : String := ".geet/objects"
 def maxDepth : Nat := 10 -- TODO: make this customisable from some .env file
 
-open System
-
-protected def pushDir (fp : FilePath) (d : String) : System.FilePath :=
-  s!"{fp.toString}/{d}"
-
 protected def addDir (fp : FilePath) : String → IO Unit :=
-  IO.FS.createDir ∘ Init.pushDir fp
+  IO.FS.createDir ∘ (fp / ·)
 
 protected def geetDirExists? : IO (Option FilePath) := do
   let curr ← IO.currentDir;
@@ -21,7 +18,7 @@ where
   aux : Nat → FilePath → IO (Option FilePath)
     | 0, _ => pure .none
     | n + 1, fp => do
-      let .false ← (FilePath.isDir ∘ flip Init.pushDir geetDir $ fp).toIO
+      let .false ← (FilePath.isDir ∘ (geetDir / ·)  $ fp).toIO
         | pure $ .some fp
 
       if let .some parent := fp.parent
@@ -29,7 +26,7 @@ where
       else pure .none
 
 protected def addObjDir (fp : FilePath) : IO Unit := do
-  let .false ← (FilePath.isDir ∘ flip Init.pushDir objDir $ fp).toIO
+  let .false ← (FilePath.isDir ∘ (objDir / ·) $ fp).toIO
     | pure ()
 
   Init.addDir fp objDir;
@@ -101,19 +98,19 @@ private def hashStr : String → String :=
 private def makeObjFile (obj : Obj) (geetDir : FilePath) (data : String) : IO String := do
   let obj_fn := hashStr data;
   let fc := obj.toBytes ++ data.toByteArray;
-  IO.FS.writeBinFile s!"{geetDir}/{Init.objDir}/{obj_fn}" fc
+  IO.FS.writeBinFile (geetDir / Init.objDir / obj_fn) fc
   pure obj_fn
 
--- TODO: make fname and fp an either dataclass
-protected def hashBlob (fname : String) (fp : Option FilePath := .none): IO String := do
+-- you can either pass in a file name or a full path (it's not an error).
+protected def hashBlob (fname : Except String FilePath) : IO String := do
   let .some dir ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."; pure ""
 
   let curr ← IO.currentDir;
   let fp :=
-    match fp with
-    | .none => s!"{curr}/{fname}"
-    | .some fp => fp.toString
+    match fname with
+    | .error fname => curr / fname
+    | .ok fname    => fname
 
   let fc ← IO.FS.readFile fp;
   makeObjFile .blob dir fc
@@ -136,7 +133,7 @@ where
         let isDir? ← edir.isDir.toIO
         if not isDir?
         then do
-          let hash ← Hash.hashBlob "" (fp := .some edir)
+          let hash ← Hash.hashBlob (.ok edir)
           handleEntries es ((.blob, e.fileName, hash) :: acc)
         else do
           let hash ← Hash.hashTree edir
@@ -151,7 +148,7 @@ protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
   let .some dir ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
-  let dir := s!"{Init.pushDir dir Init.objDir}/{hash_fn}";
+  let dir := dir / Init.objDir / hash_fn
   let .true ← (FilePath.pathExists dir).toIO
     | Log.err s!"failed to find file {dir}."
 
@@ -163,20 +160,22 @@ protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
 protected partial def readTree (curr : FilePath) (treeHash : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."
-  let obj_dir := Init.pushDir geet Init.objDir
+  let objDir := geet / Init.objDir
 
-  let dir := s!"{obj_dir}/{treeHash}"
+  let dir := objDir / treeHash
   let .true ← (FilePath.pathExists dir).toIO
     | Log.err s!"failed to find file {dir}."
 
   let (obj, fc) := strip (← IO.FS.readBinFile dir)
-  unless obj == .tree do Log.err s!"expected a tree hash, but got a {obj} hash."
 
-  let (blobs, trees) := List.partition (·.fst == .blob) ∘ parseFC $ String.fromUTF8! fc
-  writeBlobs obj_dir curr (blobs.map (·.snd))
+  if not (obj == .tree)
+  then Log.err s!"expected a tree hash, but got a {obj} hash."
+  else do
+    let (blobs, trees) := List.partition (·.fst == .blob) ∘ parseFC $ String.fromUTF8! fc
+    writeBlobs objDir curr (blobs.map (·.snd))
 
-  for (_, hash, dirname) in trees do
-    Hash.readTree s!"{curr}/{dirname}" hash
+    for (_, hash, dirname) in trees do
+      Hash.readTree (curr / dirname) hash
 where
   parseFC (fc : String) : List (Obj × String × String) :=
     (fc.splitOn (sep := "\n")).map
@@ -187,8 +186,8 @@ where
   writeBlobs : FilePath → FilePath → List (String × String) → IO Unit
     | _, _, [] => pure ()
     | odir, curr, (hash, filename) :: blobs => do
-      let (_, fc) := strip (← IO.FS.readBinFile s!"{odir}/{hash}")
-      IO.FS.writeBinFile s!"{curr}/{filename}" fc;
+      let (_, fc) := strip (← IO.FS.readBinFile $ odir / hash)
+      IO.FS.writeBinFile (curr / filename) fc
       writeBlobs odir curr blobs
 
 end Hash
