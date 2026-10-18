@@ -6,10 +6,15 @@ open System
 
 def geetDir : String := ".geet"
 def objDir : String := ".geet/objects"
+def headFile : String := ".geet/HEAD"
+
 def maxDepth : Nat := 10 -- TODO: make this customisable from some .env file
 
-protected def addDir (fp : FilePath) : String → IO Unit :=
+private def addDir (fp : FilePath) : String → IO Unit :=
   IO.FS.createDir ∘ (fp / ·)
+
+private def addFile (fp : FilePath) : String → IO Unit :=
+  flip IO.FS.writeFile "" ∘ (fp / ·)
 
 protected def geetDirExists? : IO (Option FilePath) := do
   let curr ← IO.currentDir;
@@ -18,32 +23,38 @@ where
   aux : Nat → FilePath → IO (Option FilePath)
     | 0, _ => pure .none
     | n + 1, fp => do
-      let .false ← (FilePath.isDir ∘ (geetDir / ·)  $ fp).toIO
+      let .false ← (FilePath.isDir ∘ (· / geetDir)  $ fp).toIO
         | pure $ .some fp
 
       if let .some parent := fp.parent
       then aux n parent
       else pure .none
 
-protected def addObjDir (fp : FilePath) : IO Unit := do
-  let .false ← (FilePath.isDir ∘ (objDir / ·) $ fp).toIO
+private def addHeadFile (fp : FilePath) : IO Unit := do
+  let .false ← (FilePath.pathExists ∘ (· / headFile) $ fp).toIO
+    | pure ()
+
+  Init.addFile fp headFile
+  Log.info "created .geet/HEAD file."
+
+private def addObjDir (fp : FilePath) : IO Unit := do
+  let .false ← (FilePath.isDir ∘ (· / objDir) $ fp).toIO
     | pure ()
 
   Init.addDir fp objDir;
   Log.info "created .geet/objects directory."
 
-protected def addGeetDir : IO FilePath := do
+protected def init : IO Unit := do
   let exists? ← Init.geetDirExists?;
   if let .some parent := exists?
-  then Log.err ".geet directory already exists."; pure parent
+  then Log.err s!".geet directory already exists at {parent}."; pure ()
   else do
     let curr ← IO.currentDir;
     Init.addDir curr geetDir;
-    Log.info s!"initialised .geet directory in {curr}."; pure curr
+    Log.info s!"initialised .geet directory in {curr}."
 
-protected def init : IO Unit := do
-  let geetAt ← Init.addGeetDir;
-  Init.addObjDir geetAt
+    Init.addObjDir curr
+    Init.addHeadFile curr
 
 end Init
 
@@ -56,35 +67,38 @@ private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db
 inductive Obj where
   | blob
   | tree
+  | commit
   | any -- we don't care what the obj type is here
   deriving Inhabited
 
 instance : BEq Obj where
   beq : Obj → Obj → Bool
-    | .blob, .blob => true
-    | .tree, .tree => true
+    | .blob, .blob      => true
+    | .tree, .tree      => true
+    | .commit, .commit  => true
     | .any, _ | _, .any => true
     | _, _ => false
 
 instance : ToString Obj where
   toString : Obj → String
-    | .blob => "blob"
-    | .tree => "tree"
-    | .any  => "any"
+    | .commit => "commit"
+    | .blob   => "blob"
+    | .tree   => "tree"
+    | .any    => "any"
 
 protected def Obj.ofString : String → Obj
-  | "blob" => .blob
-  | "tree" => .tree
+  | "blob"   => .blob
+  | "tree"   => .tree
+  | "commit" => .commit
   | _ => .any
 
 private def Obj.toBytes : Obj → ByteArray
-  | .blob => "blob\x00".toByteArray
-  | .tree => "tree\x00".toByteArray
   | .any => .empty
+  | obj => (toString obj ++ "\x00").toByteArray
 
 private def Obj.byteLength : Obj → Nat
-  | .blob => 5 -- we ensure to account for the null byte
-  | .tree => 5
+  | .blob | .tree => 5 -- we ensure to account for the null byte
+  | .commit => 7
   | .any  => 0
 
 -- strip the object prefix from an object file.
@@ -102,9 +116,12 @@ private def makeObjFile (obj : Obj) (geetDir : FilePath) (data : String) : IO St
   pure obj_fn
 
 -- you can either pass in a file name or a full path (it's not an error).
-protected def hashBlob (fname : Except String FilePath) : IO String := do
-  let .some dir ← Init.geetDirExists?
-    | Log.err "failed to find .geet directory."; pure ""
+protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePath := .none) : IO String := do
+  let .some geet ← (
+    match geetDir with
+    | .some geet => pure $ .some geet
+    | .none => Init.geetDirExists?
+  ) | Log.err "failed to find .geet directory."; pure ""
 
   let curr ← IO.currentDir;
   let fp :=
@@ -113,31 +130,34 @@ protected def hashBlob (fname : Except String FilePath) : IO String := do
     | .ok fname    => fname
 
   let fc ← IO.FS.readFile fp;
-  makeObjFile .blob dir fc
+  makeObjFile .blob geet fc
 
-protected partial def hashTree (dir : FilePath) : IO String := do
-  let .some geet ← Init.geetDirExists?
-    | Log.err "failed to find .geet directory"; pure ""
+protected partial def hashTree (dir : FilePath) (geetDir : Option FilePath := .none): IO String := do
+  let .some geet ← (
+    match geetDir with
+    | .some geet => pure $ .some geet
+    | .none => Init.geetDirExists?
+  ) | Log.err "failed to find .geet directory."; pure ""
 
   let entries := (← FilePath.readDir dir).toList;
-  let hashed ← handleEntries entries []
+  let hashed ← handleEntries geet entries []
   makeObjFile .tree geet (entriesToContent hashed)
 where
-  handleEntries : List IO.FS.DirEntry → List (Obj × String × String) → IO (List (Obj × String × String))
-    | [], acc => pure acc
-    | e :: es, acc => do
+  handleEntries : FilePath → List IO.FS.DirEntry → List (Obj × String × String) → IO (List (Obj × String × String))
+    | _, [], acc => pure acc
+    | geet, e :: es, acc => do
       if List.elem e.fileName ignorableFiles
-      then handleEntries es acc
+      then handleEntries geet es acc
       else
         let edir := e.path
         let isDir? ← edir.isDir.toIO
         if not isDir?
         then do
-          let hash ← Hash.hashBlob (.ok edir)
-          handleEntries es ((.blob, e.fileName, hash) :: acc)
+          let hash ← Hash.hashBlob (.ok edir) (geetDir := .some geet)
+          handleEntries geet es ((.blob, e.fileName, hash) :: acc)
         else do
-          let hash ← Hash.hashTree edir
-          handleEntries es ((.tree, e.fileName, hash) :: acc)
+          let hash ← Hash.hashTree edir (geetDir := .some geet)
+          handleEntries geet es ((.tree, e.fileName, hash) :: acc)
 
   entriesToContent : List (Obj × String × String) → String
     | [] => ""
@@ -157,9 +177,12 @@ protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
   then IO.println $ String.fromUTF8! fc
   else Log.err "expected a(n) {obj} file, but got a(n) {obj'} file."
 
-protected partial def readTree (curr : FilePath) (treeHash : String) : IO Unit := do
-  let .some geet ← Init.geetDirExists?
-    | Log.err "failed to find .geet directory."
+protected partial def readTree (curr : FilePath) (treeHash : String) (geetDir : Option FilePath := .none) : IO Unit := do
+  let .some geet ← (
+    match geetDir with
+    | .some geet => pure $ .some geet
+    | .none => Init.geetDirExists?
+  ) | Log.err "failed to find .geet directory."
   let objDir := geet / Init.objDir
 
   let dir := objDir / treeHash
@@ -167,7 +190,6 @@ protected partial def readTree (curr : FilePath) (treeHash : String) : IO Unit :
     | Log.err s!"failed to find file {dir}."
 
   let (obj, fc) := strip (← IO.FS.readBinFile dir)
-
   if not (obj == .tree)
   then Log.err s!"expected a tree hash, but got a {obj} hash."
   else do
@@ -175,7 +197,7 @@ protected partial def readTree (curr : FilePath) (treeHash : String) : IO Unit :
     writeBlobs objDir curr (blobs.map (·.snd))
 
     for (_, hash, dirname) in trees do
-      Hash.readTree (curr / dirname) hash
+      Hash.readTree (curr / dirname) hash (geetDir := .some geet)
 where
   parseFC (fc : String) : List (Obj × String × String) :=
     (fc.splitOn (sep := "\n")).map
@@ -189,5 +211,25 @@ where
       let (_, fc) := strip (← IO.FS.readBinFile $ odir / hash)
       IO.FS.writeBinFile (curr / filename) fc
       writeBlobs odir curr blobs
+
+protected def commitTree (dir : FilePath) (msg : String) : IO String := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory."; pure ""
+
+  let thash ← Hash.hashTree dir (geetDir := .some geet)
+  let prev ← readHead geet
+  let data :=
+    match prev with
+    | .none => s!"tree {thash}\n\n{msg}"
+    | .some p => s!"tree {thash}\nparent {p}\n\n{msg}"
+  let hash ← makeObjFile .commit geet data
+  IO.FS.writeFile (geet / Init.headFile) hash
+  pure hash
+where
+  readHead (geet : FilePath) : IO (Option String) := do
+    let fc ← IO.FS.readFile (geet / Init.headFile)
+    if fc.isEmpty
+    then pure .none
+    else pure $ .some fc
 
 end Hash
