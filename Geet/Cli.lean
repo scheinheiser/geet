@@ -82,9 +82,26 @@ where
     IO.println (← Hash.commitTree (← IO.currentDir) msg);
     pure 0
 
+private def logCmd := `[Cli|
+  log VIA log;
+  "show the commit tree."
+
+  FLAGS:
+    s, start : String; "provide a hash to see the tree from a specific point."
+]
+where
+  log (p : Parsed) : IO UInt32 := do
+    let start : Option String :=
+      match p.flag? "start" with
+      | .none => .none
+      | .some f => .some $ f.as! String
+
+    Hash.logCommits (begin? := start);
+    pure 0
+
 protected def geet : Cmd := `[Cli|
   geet NOOP;
-  "idk"
+  "a cool VC thing"
 
   SUBCOMMANDS:
     initCmd;
@@ -92,7 +109,8 @@ protected def geet : Cmd := `[Cli|
     catObjCmd;
     hashTreeCmd;
     writeTreeCmd;
-    commitCmd
+    commitCmd;
+    logCmd
 ]
 
 end Cli
