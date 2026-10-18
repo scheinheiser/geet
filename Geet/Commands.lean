@@ -212,6 +212,12 @@ where
       IO.FS.writeBinFile (curr / filename) fc
       writeBlobs odir curr blobs
 
+private def readHead (geet : FilePath) : IO (Option String) := do
+  let fc ← IO.FS.readFile (geet / Init.headFile)
+  if fc.isEmpty
+  then pure .none
+  else pure $ .some fc
+
 protected def commitTree (dir : FilePath) (msg : String) : IO String := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."; pure ""
@@ -225,11 +231,37 @@ protected def commitTree (dir : FilePath) (msg : String) : IO String := do
   let hash ← makeObjFile .commit geet data
   IO.FS.writeFile (geet / Init.headFile) hash
   pure hash
+
+private partial def traceCommits (geet : FilePath) (commit : String) : IO Unit := do
+  let contents@(_, phash, _) := parseCommit ∘ (·.snd) $ strip (← IO.FS.readBinFile (geet / Init.objDir / commit))
+  IO.println $ compose commit contents
+  match phash with
+  | .none => pure ()
+  | .some next => traceCommits geet next
 where
-  readHead (geet : FilePath) : IO (Option String) := do
-    let fc ← IO.FS.readFile (geet / Init.headFile)
-    if fc.isEmpty
-    then pure .none
-    else pure $ .some fc
+  parseCommit (commit : ByteArray) : (String × Option String × String) :=
+    let commit := String.fromUTF8! commit
+    let get_snd (s : String) : String :=
+      match s.splitOn with
+      | [_, hash] => hash
+      | _ => unreachable!
+    match (commit.splitOn (sep := "\n")).filter (not $ ·.isEmpty) with
+    | [tree, phash, msg] => (tree, .some $ get_snd phash, msg)
+    | [tree, msg] => (tree, .none, msg)
+    | _ => unreachable!
+
+  compose (commit : String) (contents : String × Option String × String) : String :=
+    s!"commit {commit}\n{contents.fst}\n\n  {contents.snd.snd}\n"
+
+protected def logCommits (begin? : Option String := .none) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory."
+
+  match begin? with
+  | .none => do
+    let .some commit ← readHead geet
+      | Log.err "no commits have been made."
+    traceCommits geet commit;
+  | .some commit => traceCommits geet commit
 
 end Hash
