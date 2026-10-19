@@ -6,7 +6,9 @@ open System
 
 def geetDir : String := ".geet"
 def objDir : String := ".geet/objects"
-def headFile : String := ".geet/HEAD"
+def refDir : String := ".geet/refs"
+def tagDir : String := ".geet/refs/tags"
+def headFile : String := ".geet/refs/HEAD"
 
 def maxDepth : Nat := 10 -- TODO: make this customisable from some .env file
 
@@ -37,6 +39,20 @@ private def addHeadFile (fp : FilePath) : IO Unit := do
   Init.addFile fp headFile
   Log.info "created .geet/HEAD file."
 
+private def addTagDir (fp : FilePath) : IO Unit := do
+  let .false ← (FilePath.isDir ∘ (· / tagDir) $ fp).toIO
+    | pure ()
+
+  Init.addDir fp tagDir;
+  Log.info "created .geet/refs/tags directory."
+
+private def addRefDir (fp : FilePath) : IO Unit := do
+  let .false ← (FilePath.isDir ∘ (· / refDir) $ fp).toIO
+    | pure ()
+
+  Init.addDir fp refDir;
+  Log.info "created .geet/refs directory."
+
 private def addObjDir (fp : FilePath) : IO Unit := do
   let .false ← (FilePath.isDir ∘ (· / objDir) $ fp).toIO
     | pure ()
@@ -54,6 +70,8 @@ protected def init : IO Unit := do
     Log.info s!"initialised .geet directory in {curr}."
 
     Init.addObjDir curr
+    Init.addRefDir curr
+    Init.addTagDir curr
     Init.addHeadFile curr
 
 end Init
@@ -120,6 +138,49 @@ open System
 
 private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db", "desktop.ini"]
 
+private def readRef (geet : FilePath) (ref : String) : IO (Option String) := do
+  let dir := geet / Init.refDir / ref;
+  let .true ← (FilePath.pathExists dir).toIO
+    | Log.err "ref doesn't exist."; pure .none
+
+  let fc ← IO.FS.readFile (geet / Init.refDir / ref)
+  if fc.isEmpty
+  then pure .none
+  else pure $ .some fc
+
+private def setRef (geet : FilePath) (ref : String) : String → IO Unit :=
+  IO.FS.writeFile (geet / Init.refDir / ref)
+
+private def getObjPath (geet : FilePath) : String → IO (Option String)
+  | "@" => pure ∘ .some $ (geet / Init.headFile).toString
+  | n =>
+    let toTry := [n, s!"refs/{n}", s!"refs/tags/{n}"] -- TODO: add refs/heads/{n}
+    if isHex n
+    then pure ∘ .some $ (geet / Init.objDir / n).toString
+    else tryDirs geet toTry
+where
+  tryDirs : FilePath → List String → IO (Option String)
+    | _, [] => pure .none
+    | geet, d :: dirs => do
+      let dir := geet / ".geet" / d
+      let .true ← (FilePath.pathExists dir).toIO
+        | tryDirs geet dirs
+
+      pure ∘ .some $ (geet / Init.objDir / (← IO.FS.readFile dir)).toString
+
+  -- from https://github.com/leanprover/lean4/blob/c9afcddf514a6772bd4d649f7cfc04eff0b9f15e/src/lake/Lake/Util/String.lean#L26-L37
+  isHex (s : String) : Bool :=
+    s.utf8ByteSize.all fun i h =>
+      let c := s.getUTF8Byte ⟨i⟩ h
+      if c ≤ 57 then -- '9'
+        48 ≤ c -- '0'
+      else if c ≤ 102 then -- 'f'
+        97 ≤ c -- 'a'
+      else if c ≤ 70 then -- 'F'
+        65 ≤ c -- 'A'
+      else
+        false
+
 -- you can either pass in a file name or a full path (it's not an error).
 protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePath := .none) : IO String := do
   let .some geet ← (
@@ -169,13 +230,12 @@ where
     | [(obj, fn, hash)] => s!"{obj} {hash} {fn}"
     | (obj, fn, hash) :: es => s!"{obj} {hash} {fn}\n" ++ entriesToContent es
 
-protected def catFile (obj : Hash.Obj) (hash_fn : String) : IO Unit := do
-  let .some dir ← Init.geetDirExists?
+protected def catFile (obj : Hash.Obj) (obj_fn : String) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
-  let dir := dir / Init.objDir / hash_fn
-  let .true ← (FilePath.pathExists dir).toIO
-    | Log.err s!"failed to find file {dir}."
+  let .some dir ← getObjPath geet obj_fn
+    | Log.err s!"failed to find file {obj_fn}."
 
   let (obj', fc) := Hash.strip (← IO.FS.readBinFile dir)
   if obj == obj'
@@ -190,9 +250,8 @@ protected partial def readTree (curr : FilePath) (treeHash : String) (geetDir : 
   ) | Log.err "failed to find .geet directory."
   let objDir := geet / Init.objDir
 
-  let dir := objDir / treeHash
-  let .true ← (FilePath.pathExists dir).toIO
-    | Log.err s!"failed to find file {dir}."
+  let .some dir ← getObjPath geet treeHash
+    | Log.err s!"failed to find file {treeHash}."
 
   let (obj, fc) := Hash.strip (← IO.FS.readBinFile dir)
   if not (obj == .tree)
@@ -217,32 +276,29 @@ where
       IO.FS.writeBinFile (curr / filename) fc
       writeBlobs odir curr blobs
 
-private def readHead (geet : FilePath) : IO (Option String) := do
-  let fc ← IO.FS.readFile (geet / Init.headFile)
-  if fc.isEmpty
-  then pure .none
-  else pure $ .some fc
-
 protected def commitTree (dir : FilePath) (msg : String) : IO String := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."; pure ""
 
   let thash ← Commands.hashTree dir (geetDir := .some geet)
-  let prev ← readHead geet
+  let prev ← readRef geet "HEAD"
   let data :=
     match prev with
     | .none => s!"tree {thash}\n\n{msg}"
     | .some p => s!"tree {thash}\nparent {p}\n\n{msg}"
   let hash ← Hash.makeObjFile .commit geet data
-  IO.FS.writeFile (geet / Init.headFile) hash
+  setRef geet "HEAD" hash
   pure hash
 
-private partial def traceCommits (geet : FilePath) (commit : String) : IO Unit := do
-  let contents@(_, phash, _) := parseCommit ∘ (·.snd) $ Hash.strip (← IO.FS.readBinFile (geet / Init.objDir / commit))
+private partial def traceCommits (geet : FilePath) (commit : FilePath) : IO Unit := do
+  let contents@(_, phash, _) := parseCommit ∘ (·.snd) $ Hash.strip (← IO.FS.readBinFile commit)
   IO.println $ compose commit contents
   match phash with
   | .none => pure ()
-  | .some next => traceCommits geet next
+  | .some next => do
+    match (← getObjPath geet next) with
+    | .none => unreachable! -- any stored commit must point to an actual commit.
+    | .some next => traceCommits geet next
 where
   parseCommit (commit : ByteArray) : (String × Option String × String) :=
     let commit := String.fromUTF8! commit
@@ -255,32 +311,38 @@ where
     | [tree, msg] => (tree, .none, msg)
     | _ => unreachable!
 
-  compose (commit : String) (contents : String × Option String × String) : String :=
-    s!"commit {commit}\n{contents.fst}\n\n  {contents.snd.snd}\n"
+  compose (commit : FilePath) (contents : String × Option String × String) : String :=
+    match commit.fileName with
+    | .none => unreachable! -- we used it to read the file.
+    | .some commit => s!"commit {commit}\n{contents.fst}\n\n  {contents.snd.snd}\n"
 
-protected def logCommits (begin? : Option String := .none) : IO Unit := do
+protected def logCommits (start : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."
 
-  match begin? with
-  | .none => do
-    let .some commit ← readHead geet
+  match start with
+  | "@" => do
+    let .some commit ← readRef geet "HEAD"
       | Log.err "no commits have been made."
-    traceCommits geet commit;
-  | .some commit => traceCommits geet commit
+
+    traceCommits geet (geet / Init.objDir / commit).toString;
+  | commit =>
+    match (← getObjPath geet commit) with
+    | .none => Log.err s!"chosen start {commit} does not exist."
+    | .some aliasedCommit => traceCommits geet aliasedCommit
 
 protected def checkoutCommit (commit : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
-  let dir := geet / Init.objDir / commit
-  let .true ← (FilePath.pathExists dir).toIO
+  let .some dir ← getObjPath geet commit
     | Log.err "failed to find the commit."
 
-  IO.FS.writeFile (geet / Init.headFile) commit -- set the new head
+  setRef geet "HEAD" commit
   let .some thash ← getTreeHash dir
     | pure ()
   Commands.readTree (← IO.currentDir) thash (geetDir := .some geet)
+  Log.info s!"successfully reverted to {commit}."
 where
   getTreeHash (commit : FilePath) : IO (Option String) := do
     let (.commit, fc) := Hash.strip (← IO.FS.readBinFile commit)
@@ -293,5 +355,23 @@ where
         | unreachable!
       pure $ .some thash
     | _ => pure .none
+
+protected def createTag (alias commit : String) : IO Unit :=
+  if h : alias ≠ "HEAD"
+  then aux alias commit h
+  else Log.err "alias cannot be HEAD."
+where
+  aux (alias commit : String) (_ : alias ≠ "HEAD") : IO Unit := do
+    let .some geet ← Init.geetDirExists?
+      | Log.err "failed to find .geet."
+
+    let .false ← (FilePath.pathExists $ geet / Init.tagDir / alias).toIO
+      | Log.err "alias already exists."
+
+    let .some commit ←  getObjPath geet commit
+      | Log.err s!"failed to find commit {commit}"
+
+    setRef geet s!"tags/{alias}" commit
+    Log.info s!"successfully added alias {alias}"
 
 end Commands

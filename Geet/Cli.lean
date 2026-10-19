@@ -9,8 +9,7 @@ open Cli
 private def initCmd := `[Cli|
   init VIA init;
   "initialise the .geet directory."
-]
-where
+] where
   init (_ : Parsed) : IO UInt32 := do
     Init.init;
     pure 0
@@ -21,8 +20,7 @@ private def hashBlobCmd := `[Cli|
 
   ARGS:
     ...hashes : String; "The hashes passed to the command."
-]
-where
+] where
   hashBlob (p : Parsed) : IO UInt32 := do
     let fnames : Array String := p.variableArgsAs! String;
     for f in fnames do
@@ -36,9 +34,8 @@ private def catObjCmd := `[Cli|
 
   ARGS:
     objtype : String; "The type of the object being written to stdout."
-    hash    : String; "The hash of the object being written to stdout."
-]
-where
+    hash    : String; "The hash/tag of the object being written to stdout."
+] where
   catObj (p : Parsed) : IO UInt32 := do
     let obj : String := p.positionalArg! "objtype" |>.as! String;
     let hash : String := p.positionalArg! "hash" |>.as! String;
@@ -48,8 +45,7 @@ where
 private def hashTreeCmd := `[Cli|
   hashtree VIA hashTree;
   "hash and store the cwd."
-]
-where
+] where
   hashTree (_ : Parsed) : IO UInt32 := do
     IO.println (← Commands.hashTree (← IO.currentDir))
     pure 0
@@ -59,9 +55,8 @@ private def writeTreeCmd := `[Cli|
   "restore the project to the state stored in the given hash."
 
   ARGS:
-    hash : String; "The hash of the tree being restored."
-]
-where
+    hash : String; "The hash/tag of the tree being restored."
+] where
   writeTree (p : Parsed) : IO UInt32 := do
     let hash : String := p.positionalArg! "hash" |>.as! String;
     Commands.readTree (← IO.currentDir) hash;
@@ -74,8 +69,7 @@ private def commitCmd := `[Cli|
 
   FLAGS:
     m, message : String; "provide a one line message for the commit."
-]
-where
+] where
   commit (p : Parsed) : IO UInt32 := do
     let msg : String :=
       match p.flag? "message" with
@@ -91,16 +85,15 @@ private def logCmd := `[Cli|
   "show the commit tree."
 
   FLAGS:
-    s, start : String; "provide a hash to see the tree from a specific point."
-]
-where
+    s, start : String; "provide a hash/tag to see the tree from a specific point."
+] where
   log (p : Parsed) : IO UInt32 := do
-    let start : Option String :=
+    let start : String :=
       match p.flag? "start" with
-      | .none => .none
-      | .some f => .some $ f.as! String
+      | .none => "@"
+      | .some f => f.as! String
 
-    Commands.logCommits (begin? := start);
+    Commands.logCommits start;
     pure 0
 
 private def checkoutCmd := `[Cli|
@@ -108,12 +101,31 @@ private def checkoutCmd := `[Cli|
   "return the project to a specific commit."
 
   ARGS:
-    commit : String; "the hash of the commit that you want to return to."
-]
-where
+    commit : String; "the hash/tag of the commit that you want to return to."
+] where
   checkout (p : Parsed) : IO UInt32 := do
-    let commit : String := p.positionalArg! "commit" |>.as! String;
+    let commit : String :=
+      match p.positionalArg? "commit" with
+      | .some f => f.as! String
+      | .none => "@";
     Commands.checkoutCommit commit;
+    pure 0
+
+private def tagCmd := `[Cli|
+  tag VIA tag;
+  "alias a specific commit to a name."
+
+  ARGS:
+    alias  : String; "the name that you'll alias the commit to."
+    commit : String; "the commit that you want to alias."
+] where
+  tag (p : Parsed) : IO UInt32 := do
+    let alias : String := p.positionalArg! "alias" |>.as! String;
+    let commit? : String :=
+      match p.positionalArg? "commit" with
+      | .none => "@"
+      | .some p => p.as! String;
+    Commands.createTag alias commit?;
     pure 0
 
 protected def geet : Cmd := `[Cli|
@@ -128,7 +140,8 @@ protected def geet : Cmd := `[Cli|
     writeTreeCmd;
     commitCmd;
     logCmd;
-    checkoutCmd
+    checkoutCmd;
+    tagCmd
 ]
 
 end Cli
