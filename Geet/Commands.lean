@@ -47,7 +47,7 @@ private def addObjDir (fp : FilePath) : IO Unit := do
 protected def init : IO Unit := do
   let exists? ← Init.geetDirExists?;
   if let .some parent := exists?
-  then Log.err s!".geet directory already exists at {parent}."; pure ()
+  then Log.err s!".geet directory already exists at {parent}."
   else do
     let curr ← IO.currentDir;
     Init.addDir curr geetDir;
@@ -61,8 +61,6 @@ end Init
 namespace Hash
 
 open System
-
-private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db", "desktop.ini"]
 
 inductive Obj where
   | blob
@@ -97,9 +95,8 @@ private def Obj.toBytes : Obj → ByteArray
   | obj => (toString obj ++ "\x00").toByteArray
 
 private def Obj.byteLength : Obj → Nat
-  | .blob | .tree => 5 -- we ensure to account for the null byte
-  | .commit => 7
   | .any  => 0
+  | obj => (toString obj).length + 1 -- we need to account for the null byte
 
 -- strip the object prefix from an object file.
 private def strip (b : ByteArray) : Obj × ByteArray :=
@@ -114,6 +111,14 @@ private def makeObjFile (obj : Obj) (geetDir : FilePath) (data : String) : IO St
   let fc := obj.toBytes ++ data.toByteArray;
   IO.FS.writeBinFile (geetDir / Init.objDir / obj_fn) fc
   pure obj_fn
+
+end Hash
+
+namespace Commands
+
+open System
+
+private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db", "desktop.ini"]
 
 -- you can either pass in a file name or a full path (it's not an error).
 protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePath := .none) : IO String := do
@@ -130,7 +135,7 @@ protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePa
     | .ok fname    => fname
 
   let fc ← IO.FS.readFile fp;
-  makeObjFile .blob geet fc
+  Hash.makeObjFile .blob geet fc
 
 protected partial def hashTree (dir : FilePath) (geetDir : Option FilePath := .none): IO String := do
   let .some geet ← (
@@ -141,9 +146,9 @@ protected partial def hashTree (dir : FilePath) (geetDir : Option FilePath := .n
 
   let entries := (← FilePath.readDir dir).toList;
   let hashed ← handleEntries geet entries []
-  makeObjFile .tree geet (entriesToContent hashed)
+  Hash.makeObjFile .tree geet (entriesToContent hashed)
 where
-  handleEntries : FilePath → List IO.FS.DirEntry → List (Obj × String × String) → IO (List (Obj × String × String))
+  handleEntries : FilePath → List IO.FS.DirEntry → List (Hash.Obj × String × String) → IO (List (Hash.Obj × String × String))
     | _, [], acc => pure acc
     | geet, e :: es, acc => do
       if List.elem e.fileName ignorableFiles
@@ -153,18 +158,18 @@ where
         let isDir? ← edir.isDir.toIO
         if not isDir?
         then do
-          let hash ← Hash.hashBlob (.ok edir) (geetDir := .some geet)
+          let hash ← Commands.hashBlob (.ok edir) (geetDir := .some geet)
           handleEntries geet es ((.blob, e.fileName, hash) :: acc)
         else do
-          let hash ← Hash.hashTree edir (geetDir := .some geet)
+          let hash ← Commands.hashTree edir (geetDir := .some geet)
           handleEntries geet es ((.tree, e.fileName, hash) :: acc)
 
-  entriesToContent : List (Obj × String × String) → String
+  entriesToContent : List (Hash.Obj × String × String) → String
     | [] => ""
     | [(obj, fn, hash)] => s!"{obj} {hash} {fn}"
     | (obj, fn, hash) :: es => s!"{obj} {hash} {fn}\n" ++ entriesToContent es
 
-protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
+protected def catFile (obj : Hash.Obj) (hash_fn : String) : IO Unit := do
   let .some dir ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
@@ -172,7 +177,7 @@ protected def catFile (obj : Obj) (hash_fn : String) : IO Unit := do
   let .true ← (FilePath.pathExists dir).toIO
     | Log.err s!"failed to find file {dir}."
 
-  let (obj', fc) := strip (← IO.FS.readBinFile dir)
+  let (obj', fc) := Hash.strip (← IO.FS.readBinFile dir)
   if obj == obj'
   then IO.println $ String.fromUTF8! fc
   else Log.err "expected a(n) {obj} file, but got a(n) {obj'} file."
@@ -189,7 +194,7 @@ protected partial def readTree (curr : FilePath) (treeHash : String) (geetDir : 
   let .true ← (FilePath.pathExists dir).toIO
     | Log.err s!"failed to find file {dir}."
 
-  let (obj, fc) := strip (← IO.FS.readBinFile dir)
+  let (obj, fc) := Hash.strip (← IO.FS.readBinFile dir)
   if not (obj == .tree)
   then Log.err s!"expected a tree hash, but got a {obj} hash."
   else do
@@ -197,18 +202,18 @@ protected partial def readTree (curr : FilePath) (treeHash : String) (geetDir : 
     writeBlobs objDir curr (blobs.map (·.snd))
 
     for (_, hash, dirname) in trees do
-      Hash.readTree (curr / dirname) hash (geetDir := .some geet)
+      Commands.readTree (curr / dirname) hash (geetDir := .some geet)
 where
-  parseFC (fc : String) : List (Obj × String × String) :=
+  parseFC (fc : String) : List (Hash.Obj × String × String) :=
     (fc.splitOn (sep := "\n")).map
       (match String.splitOn · with
-        | [obj, hash, fn] => (Obj.ofString obj, hash, fn)
+        | [obj, hash, fn] => (Hash.Obj.ofString obj, hash, fn)
         | _ => unreachable!)
 
   writeBlobs : FilePath → FilePath → List (String × String) → IO Unit
     | _, _, [] => pure ()
     | odir, curr, (hash, filename) :: blobs => do
-      let (_, fc) := strip (← IO.FS.readBinFile $ odir / hash)
+      let (_, fc) := Hash.strip (← IO.FS.readBinFile $ odir / hash)
       IO.FS.writeBinFile (curr / filename) fc
       writeBlobs odir curr blobs
 
@@ -222,18 +227,18 @@ protected def commitTree (dir : FilePath) (msg : String) : IO String := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."; pure ""
 
-  let thash ← Hash.hashTree dir (geetDir := .some geet)
+  let thash ← Commands.hashTree dir (geetDir := .some geet)
   let prev ← readHead geet
   let data :=
     match prev with
     | .none => s!"tree {thash}\n\n{msg}"
     | .some p => s!"tree {thash}\nparent {p}\n\n{msg}"
-  let hash ← makeObjFile .commit geet data
+  let hash ← Hash.makeObjFile .commit geet data
   IO.FS.writeFile (geet / Init.headFile) hash
   pure hash
 
 private partial def traceCommits (geet : FilePath) (commit : String) : IO Unit := do
-  let contents@(_, phash, _) := parseCommit ∘ (·.snd) $ strip (← IO.FS.readBinFile (geet / Init.objDir / commit))
+  let contents@(_, phash, _) := parseCommit ∘ (·.snd) $ Hash.strip (← IO.FS.readBinFile (geet / Init.objDir / commit))
   IO.println $ compose commit contents
   match phash with
   | .none => pure ()
@@ -264,4 +269,29 @@ protected def logCommits (begin? : Option String := .none) : IO Unit := do
     traceCommits geet commit;
   | .some commit => traceCommits geet commit
 
-end Hash
+protected def checkoutCommit (commit : String) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory"
+
+  let dir := geet / Init.objDir / commit
+  let .true ← (FilePath.pathExists dir).toIO
+    | Log.err "failed to find the commit."
+
+  IO.FS.writeFile (geet / Init.headFile) commit -- set the new head
+  let .some thash ← getTreeHash dir
+    | pure ()
+  Commands.readTree (← IO.currentDir) thash (geetDir := .some geet)
+where
+  getTreeHash (commit : FilePath) : IO (Option String) := do
+    let (.commit, fc) := Hash.strip (← IO.FS.readBinFile commit)
+      | Log.err "expected a commit hash."; pure .none
+
+    let fc := String.fromUTF8! fc;
+    match fc.splitOn (sep := "\n") with
+    | tree :: _ => do
+      let [_, thash] := tree.splitOn
+        | unreachable!
+      pure $ .some thash
+    | _ => pure .none
+
+end Commands

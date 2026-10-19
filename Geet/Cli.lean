@@ -5,7 +5,6 @@ import Geet.Log
 namespace Cli
 
 open Cli
-private def const.{u, v} {α : Sort u} {β : Sort v} (a : α) : β → α := Function.const β a
 
 private def initCmd := `[Cli|
   init VIA init;
@@ -27,7 +26,7 @@ where
   hashBlob (p : Parsed) : IO UInt32 := do
     let fnames : Array String := p.variableArgsAs! String;
     for f in fnames do
-      IO.println (← Hash.hashBlob (.error f))
+      IO.println (← Commands.hashBlob (.error f))
 
     pure 0
 
@@ -43,7 +42,7 @@ where
   catObj (p : Parsed) : IO UInt32 := do
     let obj : String := p.positionalArg! "objtype" |>.as! String;
     let hash : String := p.positionalArg! "hash" |>.as! String;
-    Hash.catFile (Hash.Obj.ofString obj) hash;
+    Commands.catFile (Hash.Obj.ofString obj) hash;
     pure 0
 
 private def hashTreeCmd := `[Cli|
@@ -52,7 +51,7 @@ private def hashTreeCmd := `[Cli|
 ]
 where
   hashTree (_ : Parsed) : IO UInt32 := do
-    IO.println (← Hash.hashTree (← IO.currentDir))
+    IO.println (← Commands.hashTree (← IO.currentDir))
     pure 0
 
 private def writeTreeCmd := `[Cli|
@@ -65,7 +64,7 @@ private def writeTreeCmd := `[Cli|
 where
   writeTree (p : Parsed) : IO UInt32 := do
     let hash : String := p.positionalArg! "hash" |>.as! String;
-    Hash.readTree (← IO.currentDir) hash;
+    Commands.readTree (← IO.currentDir) hash;
     Log.info s!"successfully reverted to {hash}.";
     pure 0
 
@@ -78,8 +77,13 @@ private def commitCmd := `[Cli|
 ]
 where
   commit (p : Parsed) : IO UInt32 := do
-    let msg : String := p.flag! "message" |>.as! String;
-    IO.println (← Hash.commitTree (← IO.currentDir) msg);
+    let msg : String :=
+      match p.flag? "message" with
+      | .some p => p.as! String
+       -- TODO: maybe add a number to show the amount of commits that have been made
+       -- TODO: or function like git & open an editor? use a temp file and stuff
+      | .none => "commit"
+    IO.println (← Commands.commitTree (← IO.currentDir) msg);
     pure 0
 
 private def logCmd := `[Cli|
@@ -96,7 +100,20 @@ where
       | .none => .none
       | .some f => .some $ f.as! String
 
-    Hash.logCommits (begin? := start);
+    Commands.logCommits (begin? := start);
+    pure 0
+
+private def checkoutCmd := `[Cli|
+  checkout VIA checkout;
+  "return the project to a specific commit."
+
+  ARGS:
+    commit : String; "the hash of the commit that you want to return to."
+]
+where
+  checkout (p : Parsed) : IO UInt32 := do
+    let commit : String := p.positionalArg! "commit" |>.as! String;
+    Commands.checkoutCommit commit;
     pure 0
 
 protected def geet : Cmd := `[Cli|
@@ -110,7 +127,8 @@ protected def geet : Cmd := `[Cli|
     hashTreeCmd;
     writeTreeCmd;
     commitCmd;
-    logCmd
+    logCmd;
+    checkoutCmd
 ]
 
 end Cli
