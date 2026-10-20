@@ -98,14 +98,14 @@ private def logCmd := `[Cli|
 
 private def checkoutCmd := `[Cli|
   checkout VIA checkout;
-  "return the project to a specific commit."
+  "return the project to a specific commit; if no commit is given, it defaults to HEAD."
 
-  ARGS:
-    commit : String; "the hash/tag of the commit that you want to return to."
+  FLAGS:
+    c, commit : String; "the hash/tag of the commit that you want to return to."
 ] where
   checkout (p : Parsed) : IO UInt32 := do
     let commit : String :=
-      match p.positionalArg? "commit" with
+      match p.flag? "commit" with
       | .some f => f.as! String
       | .none => "@";
     Commands.checkoutCommit commit;
@@ -113,19 +113,21 @@ private def checkoutCmd := `[Cli|
 
 private def tagCmd := `[Cli|
   tag VIA tag;
-  "alias a specific commit to a name."
+  "alias a specific commit to a name; if no commit is given, it defaults to HEAD."
+
+  FLAGS:
+    c, commit : String; "the commit that you want to alias."
 
   ARGS:
     alias  : String; "the name that you'll alias the commit to."
-    commit : String; "the commit that you want to alias."
 ] where
   tag (p : Parsed) : IO UInt32 := do
     let alias : String := p.positionalArg! "alias" |>.as! String;
-    let commit? : String :=
-      match p.positionalArg? "commit" with
+    let commit : String :=
+      match p.flag? "commit" with
       | .none => "@"
       | .some p => p.as! String;
-    Commands.createTag alias commit?;
+    Commands.createTag alias commit;
     pure 0
 
 protected def geet : Cmd := `[Cli|
