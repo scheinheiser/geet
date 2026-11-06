@@ -1,6 +1,9 @@
 import Cli
 import Geet.Commands
 import Geet.Log
+import Std.Data.HashSet
+
+open Std (HashSet)
 
 namespace Cli
 
@@ -130,6 +133,38 @@ private def tagCmd := `[Cli|
     Commands.createTag alias commit;
     pure 0
 
+private partial def kCmd := `[Cli|
+  k VIA k;
+  "visualise the commit history for the project."
+] where
+  k (_ : Parsed) : IO UInt32 := do
+    let mut objIds : HashSet String := HashSet.emptyWithCapacity;
+
+    for (f, fc) in (← Commands.walkRefs) do
+      IO.println s!"{f} {match fc with | .none => "" | .some fc => s!"→ {fc}"}";
+      objIds :=
+        match fc with
+        | .none    => objIds
+        | .some fc => objIds.insert fc
+
+    IO.println "";
+
+    for (oid, parent) in (← dedupRefs objIds.toList HashSet.emptyWithCapacity) do
+      IO.println s!"{oid} {match parent with | .none => "" | .some p => s!"; parent {p}"}";
+
+    pure 0
+
+  dedupRefs : List String → HashSet (String × Option String) → IO (HashSet (String × Option String))
+    | [], acc => pure acc
+    | oid :: oids, acc =>
+      if acc.any (·.fst == oid)
+      then dedupRefs oids acc
+      else do
+        let (_, .some parent, _) ← Commands.getCommit oid
+          | dedupRefs oids (acc.insert (oid, .none))
+
+        dedupRefs (oids.insert parent) $ acc.insert (oid, .some parent)
+
 protected def geet : Cmd := `[Cli|
   geet NOOP;
   "a cool VC thing"
@@ -143,7 +178,8 @@ protected def geet : Cmd := `[Cli|
     commitCmd;
     logCmd;
     checkoutCmd;
-    tagCmd
+    tagCmd;
+    kCmd
 ]
 
 end Cli

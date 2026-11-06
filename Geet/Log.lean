@@ -18,8 +18,8 @@ where
     s!"{lvl}: {msg}"
 
 protected def debug : String → IO Unit := log ∘ .debug
-protected def info : String → IO Unit := log ∘ .info
-protected def warn : String → IO Unit := log ∘ .warn
-protected def err : String → IO Unit := log ∘ .err
+protected def info  : String → IO Unit := log ∘ .info
+protected def warn  : String → IO Unit := log ∘ .warn
+protected def err   : String → IO α := (λ _ => IO.Process.exit 1) ∘ log ∘ .err
 
 end Log
