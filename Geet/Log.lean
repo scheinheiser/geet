@@ -20,6 +20,10 @@ where
 protected def debug : String → IO Unit := log ∘ .debug
 protected def info  : String → IO Unit := log ∘ .info
 protected def warn  : String → IO Unit := log ∘ .warn
-protected def err   : String → IO α := (λ _ => IO.Process.exit 1) ∘ log ∘ .err
+
+-- we terminate execution after an error is reported.
+protected def err (s: String) : IO α := do
+  log $ .err s;
+  IO.Process.exit 1
 
 end Log

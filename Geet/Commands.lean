@@ -155,7 +155,7 @@ private def getObjId (geet : FilePath) : String → IO (Option String)
   | "@" => readRef geet "HEAD"
   | n =>
     let toTry := [n, s!"refs/{n}", s!"refs/tags/{n}"] -- TODO: add refs/heads/{n}
-    if isHex n
+    if n.toList.all (·.isHexDigit)
     then pure $ .some n
     else tryDirs geet toTry
 where
@@ -170,19 +170,6 @@ where
       if fc.isEmpty
       then pure .none
       else pure $ .some fc
-
-  -- from https://github.com/leanprover/lean4/blob/c9afcddf514a6772bd4d649f7cfc04eff0b9f15e/src/lake/Lake/Util/String.lean#L26-L37
-  isHex (s : String) : Bool :=
-    s.utf8ByteSize.all fun i h =>
-      let c := s.getUTF8Byte ⟨i⟩ h
-      if c ≤ 57 then -- '9'
-        48 ≤ c -- '0'
-      else if c ≤ 102 then -- 'f'
-        97 ≤ c -- 'a'
-      else if c ≤ 70 then -- 'F'
-        65 ≤ c -- 'A'
-      else
-        false
 
 -- parse a commit file.
 private def parseCommit (commit : ByteArray) : (String × Option String × String) :=
