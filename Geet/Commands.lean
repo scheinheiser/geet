@@ -209,10 +209,13 @@ protected def getCommit (commit : String) (geetDir : Option FilePath := .none) :
   let .true ← FilePath.pathExists dir
     | Log.err s!"failed to find commit {commit}."
 
-  pure $ parseCommit ∘ (·.snd) ∘ Hash.strip $ (← IO.FS.readBinFile dir)
+  let (.commit, fc) := Hash.strip (← IO.FS.readBinFile dir)
+    | Log.err "Expected a commit hash."
 
--- you can either pass in a file name or a full path (it's not an error).
-protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePath := .none) : IO String := do
+  pure $ parseCommit fc
+
+-- you can either pass in a file name or a full path
+protected def hashBlob (fname : String ⊕ FilePath) (geetDir : Option FilePath := .none) : IO String := do
   let .some geet ← (
     match geetDir with
     | .some geet => pure $ .some geet
@@ -222,8 +225,8 @@ protected def hashBlob (fname : Except String FilePath) (geetDir : Option FilePa
   let curr ← IO.currentDir;
   let fp :=
     match fname with
-    | .error fname => curr / fname
-    | .ok fname    => fname
+    | .inl fname => curr / fname
+    | .inr fname => fname
 
   let fc ← IO.FS.readFile fp;
   Hash.makeObjFile .blob geet fc
@@ -237,7 +240,7 @@ protected partial def hashTree (dir : FilePath) (geetDir : Option FilePath := .n
 
   let entries := (← FilePath.readDir dir).toList;
   let hashed ← handleEntries geet entries []
-  Hash.makeObjFile .tree geet (entriesToContent hashed)
+  Hash.makeObjFile .tree geet (hashed.map (λ (obj, fn, hash) => s!"{obj} {hash} {fn}") |> "\n".intercalate)
 where
   handleEntries : FilePath → List IO.FS.DirEntry → List (Hash.Obj × String × String) → IO (List (Hash.Obj × String × String))
     | _, [], acc => pure acc
@@ -249,16 +252,11 @@ where
         let isDir? ← edir.isDir.toIO
         if not isDir?
         then do
-          let hash ← Commands.hashBlob (.ok edir) (geetDir := .some geet)
+          let hash ← Commands.hashBlob (.inr edir) (geetDir := .some geet)
           handleEntries geet es ((.blob, e.fileName, hash) :: acc)
         else do
           let hash ← Commands.hashTree edir (geetDir := .some geet)
           handleEntries geet es ((.tree, e.fileName, hash) :: acc)
-
-  entriesToContent : List (Hash.Obj × String × String) → String
-    | [] => ""
-    | [(obj, fn, hash)] => s!"{obj} {hash} {fn}"
-    | (obj, fn, hash) :: es => s!"{obj} {hash} {fn}\n" ++ entriesToContent es
 
 protected def catFile (obj : Hash.Obj) (obj_fn : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
@@ -328,9 +326,8 @@ private partial def traceCommits (geet : FilePath) (commit : FilePath) : IO (Lis
   match phash with
   | .none => pure [(commit, contents)]
   | .some next => do
-    match (← getObjId geet next) with
-    | .none => unreachable! -- any stored commit will point to an actual commit.
-    | .some next => pure $ (commit, contents) :: (← traceCommits geet next)
+    let next := (← getObjId geet next).get!;
+    pure $ (commit, contents) :: (← traceCommits geet next)
 
 protected def logCommits (start : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
@@ -340,18 +337,11 @@ protected def logCommits (start : String) : IO Unit := do
     | Log.err s!"failed to find hash {start}."
 
   let commits ← traceCommits geet start
-  let logMsg : String := concat $ commits.map (λ c => compose c.fst c.snd)
+  let logMsg : String := "\n\n".intercalate $ commits.map (λ (commit, contents) => compose commit contents)
   IO.println logMsg
 where
   compose (commit : FilePath) (contents : String × Option String × String) : String :=
-    match commit.fileName with
-    | .none => unreachable! -- we used it to read the file.
-    | .some commit => s!"commit {commit}\n{contents.fst}\n\n  {contents.snd.snd}"
-
-  concat : List String → String
-    | [] => ""
-    | [s] => s
-    | str :: strs => s!"{str}\n\n" ++ concat strs
+    s!"commit {commit.fileName.get!}\n{contents.fst}\n\n {contents.snd.snd}"
 
 protected def checkoutCommit (commit : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
@@ -361,23 +351,10 @@ protected def checkoutCommit (commit : String) : IO Unit := do
     | Log.err s!"failed to find the commit {commit}."
 
   setRef geet "HEAD" id
-  let dir := geet / Init.objDir / id
-  let .some thash ← getTreeHash dir
-    | pure ()
+  let (thash, _, _) ← Commands.getCommit (geetDir := geet) commit
+
   Commands.readTree (← IO.currentDir) thash (geetDir := .some geet)
   Log.info s!"successfully reverted to {if commit == "@" then "HEAD" else commit}."
-where
-  getTreeHash (commit : FilePath) : IO (Option String) := do
-    let (.commit, fc) := Hash.strip (← IO.FS.readBinFile commit)
-      | Log.err "expected a commit hash."
-
-    let fc := String.fromUTF8! fc;
-    match fc.splitOn (sep := "\n") with
-    | tree :: _ => do
-      let [_, thash] := tree.splitOn
-        | unreachable!
-      pure $ .some thash
-    | _ => pure .none
 
 protected def createTag (alias commit : String) : IO Unit :=
   if h : alias ≠ "HEAD"

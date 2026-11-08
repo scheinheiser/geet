@@ -27,10 +27,11 @@ private def hashBlobCmd := `[Cli|
   hashBlob (p : Parsed) : IO UInt32 := do
     let fnames : Array String := p.variableArgsAs! String;
     for f in fnames do
-      IO.println (← Commands.hashBlob (.error f))
+      IO.println (← Commands.hashBlob $ .inl f)
 
     pure 0
 
+-- TODO: remove the need to pass in the object type OR make it a flag to verify.
 private def catObjCmd := `[Cli|
   catobj VIA catObj;
   "writes the contents of a hashed file to stdout."
@@ -138,7 +139,8 @@ private partial def kCmd := `[Cli|
   "visualise the commit history for the project."
 ] where
   k (_ : Parsed) : IO UInt32 := do
-    let mut objIds : HashSet String := HashSet.emptyWithCapacity;
+    -- we use lists so that it has a bit more order
+    let mut objIds : List String := [];
 
     for (f, fc) in (← Commands.walkRefs) do
       IO.println s!"{f} {match fc with | .none => "" | .some fc => s!"→ {fc}"}";
@@ -149,19 +151,19 @@ private partial def kCmd := `[Cli|
 
     IO.println "";
 
-    for (oid, parent) in (← dedupRefs objIds.toList HashSet.emptyWithCapacity) do
+    for (oid, parent) in (← dedupRefs objIds []) do
       IO.println s!"{oid} {match parent with | .none => "" | .some p => s!"; parent {p}"}";
 
     pure 0
 
-  dedupRefs : List String → HashSet (String × Option String) → IO (HashSet (String × Option String))
+  dedupRefs : List String → List (String × Option String) → IO (List (String × Option String))
     | [], acc => pure acc
     | oid :: oids, acc =>
       if acc.any (·.fst == oid)
       then dedupRefs oids acc
       else do
         let (_, .some parent, _) ← Commands.getCommit oid
-          | dedupRefs oids (acc.insert (oid, .none))
+          | dedupRefs oids $ acc.insert (oid, .none)
 
         dedupRefs (oids.insert parent) $ acc.insert (oid, .some parent)
 
