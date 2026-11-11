@@ -155,7 +155,7 @@ private def getObjId (geet : FilePath) : String → IO (Option String)
   | "@" => readRef geet "HEAD"
   | n =>
     let toTry := [n, s!"refs/{n}", s!"refs/tags/{n}"] -- TODO: add refs/heads/{n}
-    if n.toList.all (·.isHexDigit)
+    if n.all (·.isHexDigit)
     then pure $ .some n
     else tryDirs geet toTry
 where

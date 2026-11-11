@@ -139,33 +139,42 @@ private partial def kCmd := `[Cli|
   "visualise the commit history for the project."
 ] where
   k (_ : Parsed) : IO UInt32 := do
-    -- we use lists so that it has a bit more order
-    let mut objIds : List String := [];
+    let digraph := "digraph commits {\n";
+    let (objIds, digraph) := connectRefs (← Commands.walkRefs) [] digraph;
+    let digraph := connectCommits (← followCommits objIds []) digraph;
 
-    for (f, fc) in (← Commands.walkRefs) do
-      IO.println s!"{f} {match fc with | .none => "" | .some fc => s!"→ {fc}"}";
-      objIds :=
-        match fc with
-        | .none    => objIds
-        | .some fc => objIds.insert fc
-
-    IO.println "";
-
-    for (oid, parent) in (← dedupRefs objIds []) do
-      IO.println s!"{oid} {match parent with | .none => "" | .some p => s!"; parent {p}"}";
-
+    IO.println $ digraph ++ "}"
     pure 0
 
-  dedupRefs : List String → List (String × Option String) → IO (List (String × Option String))
+  connectRefs : List (String × Option String) → List String → String → (List String × String)
+    | [], ids, acc => (ids, acc)
+    | (f, fc) :: refs, ids, acc =>
+      match fc with
+      | .none => connectRefs refs ids acc
+      | .some ref =>
+        let refStr := s!"\"{f}\" [shape=note]\n\"{f}\" -> \"{ref}\"\n";
+        connectRefs refs (ids.insert ref) (acc ++ refStr)
+
+  followCommits : List String → List (String × Option String) → IO (List (String × Option String))
     | [], acc => pure acc
     | oid :: oids, acc =>
       if acc.any (·.fst == oid)
-      then dedupRefs oids acc
+      then followCommits oids acc
       else do
         let (_, .some parent, _) ← Commands.getCommit oid
-          | dedupRefs oids $ acc.insert (oid, .none)
+          | followCommits oids $ acc.insert (oid, .none)
 
-        dedupRefs (oids.insert parent) $ acc.insert (oid, .some parent)
+        followCommits (oids.insert parent) $ acc.insert (oid, .some parent)
+
+  connectCommits : List (String × Option String) → String → String
+    | [], acc => acc
+    | (oid, parent) :: comms, acc =>
+      let acc := acc ++ s!"\"{oid}\" [shape=box style=filled label=\"{oid}\"]\n";
+      match parent with
+      | .none => connectCommits comms acc
+      | .some p =>
+        let p := s!"\"{oid}\" -> \"{p}\"\n";
+        connectCommits comms (acc ++ p)
 
 protected def geet : Cmd := `[Cli|
   geet NOOP;
