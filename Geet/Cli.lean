@@ -36,14 +36,16 @@ private def catObjCmd := `[Cli|
   catobj VIA catObj;
   "writes the contents of a hashed file to stdout."
 
+  FLAGS:
+    t, type : String; "The type of the object being written to stdout."
+
   ARGS:
-    objtype : String; "The type of the object being written to stdout."
     hash    : String; "The hash/tag of the object being written to stdout."
 ] where
   catObj (p : Parsed) : IO UInt32 := do
-    let obj : String := p.positionalArg! "objtype" |>.as! String;
+    let obj : Option Hash.Obj := p.flag? "type" >>= pure ∘ Hash.Obj.ofString ∘ (·.as! String);
     let hash : String := p.positionalArg! "hash" |>.as! String;
-    Commands.catFile (Hash.Obj.ofString obj) hash;
+    Commands.catFile (obj := obj) hash;
     pure 0
 
 private def hashTreeCmd := `[Cli|
@@ -139,9 +141,12 @@ private partial def kCmd := `[Cli|
   "visualise the commit history for the project."
 ] where
   k (_ : Parsed) : IO UInt32 := do
+    let .some geet ← Init.geetDirExists?
+      | Log.err "failed to find .geet directory.";
+
     let digraph := "digraph commits {\n";
-    let (objIds, digraph) := connectRefs (← Commands.walkRefs) [] digraph;
-    let digraph := connectCommits (← followCommits objIds []) digraph;
+    let (objIds, digraph) := connectRefs (← Commands.walkRefs (geetDir := .some geet)) [] digraph;
+    let digraph := connectCommits (← Commands.followCommits objIds geet []) digraph;
 
     IO.println $ digraph ++ "}"
     pure 0
@@ -155,20 +160,9 @@ private partial def kCmd := `[Cli|
         let refStr := s!"\"{f}\" [shape=note]\n\"{f}\" -> \"{ref}\"\n";
         connectRefs refs (ids.insert ref) (acc ++ refStr)
 
-  followCommits : List String → List (String × Option String) → IO (List (String × Option String))
-    | [], acc => pure acc
-    | oid :: oids, acc =>
-      if acc.any (·.fst == oid)
-      then followCommits oids acc
-      else do
-        let (_, .some parent, _) ← Commands.getCommit oid
-          | followCommits oids $ acc.insert (oid, .none)
-
-        followCommits (oids.insert parent) $ acc.insert (oid, .some parent)
-
-  connectCommits : List (String × Option String) → String → String
+  connectCommits : List (String × String × Option String × String) → String → String
     | [], acc => acc
-    | (oid, parent) :: comms, acc =>
+    | (oid, _, parent, _) :: comms, acc =>
       let acc := acc ++ s!"\"{oid}\" [shape=box style=filled label=\"{oid}\"]\n";
       match parent with
       | .none => connectCommits comms acc
