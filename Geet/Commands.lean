@@ -7,13 +7,16 @@ instance : Functor (Prod α) where
 namespace Init
 open System
 
-def geetDir : String := ".geet"
-def objDir : String := ".geet/objects"
-def refDir : String := ".geet/refs"
-def tagDir : String := ".geet/refs/tags"
-def headFile : String := ".geet/refs/HEAD"
+def geetDir   : String := ".geet"
+def objDir    : String := ".geet/objects"
+def refDir    : String := ".geet/refs"
+def headsDir  : String := ".geet/refs/heads"
+def tagDir    : String := ".geet/refs/tags"
+def headFile  : String := ".geet/refs/HEAD"
 
-def maxDepth : Nat := 10 -- TODO: make this customisable from some .env file
+-- TODO: make this customisable from some .env file or something
+def defaultBranch : String := "main"
+def maxDepth : Nat := 10
 
 private def addDir (fp : FilePath) : String → IO Unit :=
   IO.FS.createDir ∘ (fp / ·)
@@ -40,28 +43,30 @@ private def addHeadFile (fp : FilePath) : IO Unit := do
     | pure ()
 
   Init.addFile fp headFile
-  Log.info "created .geet/HEAD file."
 
 private def addTagDir (fp : FilePath) : IO Unit := do
   let .false ← (FilePath.isDir ∘ (· / tagDir) $ fp).toIO
     | pure ()
 
   Init.addDir fp tagDir;
-  Log.info "created .geet/refs/tags directory."
 
 private def addRefDir (fp : FilePath) : IO Unit := do
   let .false ← (FilePath.isDir ∘ (· / refDir) $ fp).toIO
     | pure ()
 
   Init.addDir fp refDir;
-  Log.info "created .geet/refs directory."
+
+private def addHeadsDir (fp : FilePath) : IO Unit := do
+  let .false ← (FilePath.isDir ∘ (· / headsDir) $ fp).toIO
+    | pure ()
+
+  Init.addDir fp headsDir
 
 private def addObjDir (fp : FilePath) : IO Unit := do
   let .false ← (FilePath.isDir ∘ (· / objDir) $ fp).toIO
     | pure ()
 
   Init.addDir fp objDir;
-  Log.info "created .geet/objects directory."
 
 protected def init : IO Unit := do
   let exists? ← Init.geetDirExists?;
@@ -70,12 +75,17 @@ protected def init : IO Unit := do
   else do
     let curr ← IO.currentDir;
     Init.addDir curr geetDir;
-    Log.info s!"initialised .geet directory in {curr}."
+    Log.info s!"initialised empty .geet directory in {curr}."
 
-    Init.addObjDir curr
-    Init.addRefDir curr
-    Init.addTagDir curr
+    Init.addObjDir   curr
+    Init.addRefDir   curr
+    Init.addHeadsDir curr
+    Init.addTagDir   curr
     Init.addHeadFile curr
+
+    -- set HEAD to main
+    Init.addFile    (curr / headsDir) defaultBranch
+    IO.FS.writeFile (curr / headFile) s!"ref: heads/{defaultBranch}"
 
 end Init
 
@@ -139,27 +149,47 @@ namespace Commands
 
 open System
 
+structure RefValue where
+  symbolic? : Bool
+  value     : Option String
+
+private def nonSym (value : Option String) : RefValue := { symbolic? := .false, value }
+private def sym    (value : Option String) : RefValue := { symbolic? := .true,  value }
+
 private def ignorableFiles := [".geet", ".git", ".lake", ".DS_Store", "thumbs.db", "desktop.ini"]
 
-private def readRef (geet : FilePath) (ref : String) : IO (Option String) := do
+-- read a ref file, chasing any symbolic refs.
+-- returns both the name of the ref file that was read, and id found.
+private partial def _readRef (geet : FilePath) (ref : String) (deref? : Bool) : IO (String × RefValue) := do
   let dir := geet / Init.refDir / ref;
   let .true ← (FilePath.pathExists dir).toIO
     | Log.err s!"ref {ref} doesn't exist."
 
   let fc ← IO.FS.readFile (geet / Init.refDir / ref)
-  if fc.isEmpty
-  then pure .none
-  else pure $ .some fc
+  match fc.splitOn (sep := "ref: ") with
+  | [ nonSymId ] => if nonSymId.isEmpty then pure (ref, nonSym .none) else pure (ref, nonSym $ .some nonSymId)
+  | [ _, isSym ] => if deref? then _readRef geet isSym deref? else pure (ref, sym $ .some isSym)
+  | _ => unreachable!
 
-private def setRef (geet : FilePath) (ref : String) : String → IO Unit :=
-  IO.FS.writeFile (geet / Init.refDir / ref)
+private partial def readRef (geet : FilePath) (ref : String) (deref? : Bool := true) : IO RefValue := do
+  pure $ (← _readRef geet ref deref?).snd
+
+private def setRef (geet : FilePath) (ref : String) (hash : RefValue) (deref? : Bool := true) : IO Unit := do
+  let (refName, _) ← _readRef geet ref deref?;
+  let hash :=
+    if hash.symbolic?
+    then s!"ref: {hash.value.get!}"
+    else hash.value.get!;
+
+  IO.FS.writeFile (geet / Init.refDir / refName) hash
 
 -- get the commit hash from a given string.
--- the string is either @ (HEAD), a tag ora commit hash.
-private def getObjId (geet : FilePath) : String → IO (Option String)
-  | "@" => readRef geet "HEAD"
+-- the string is either @ (HEAD), a tag or a commit hash.
+protected def getObjId (geet : FilePath) (commit : String) (deref? : Bool := true) : IO (Option String) :=
+  match commit with
+  | "@" => do pure (← readRef geet "HEAD" deref?).value
   | n =>
-    let toTry := [n, s!"refs/{n}", s!"refs/tags/{n}"] -- TODO: add refs/heads/{n}
+    let toTry := [n, s!"refs/{n}", s!"refs/tags/{n}", s!"refs/heads/{n}"]
     if n.all (·.isHexDigit)
     then pure $ .some n
     else tryDirs geet toTry
@@ -172,9 +202,10 @@ where
         | tryDirs geet dirs
 
       let fc ← IO.FS.readFile dir;
-      if fc.isEmpty
-      then pure .none
-      else pure $ .some fc
+      match fc.splitOn (sep := "ref: ") with
+      | [ nonSymId ]   => if nonSymId.isEmpty then pure .none else pure $ .some nonSymId
+      | [ _, isSym ] => do pure (← readRef geet isSym deref?).value
+      | _ => unreachable!
 
 -- traverse the ref directory, and return the ref filepath with the possible commit hash.
 protected partial def walkRefs (geetDir : Option FilePath := .none) : IO (List (String × Option String)) := do
@@ -201,7 +232,7 @@ where
   getFC : FilePath → List FilePath → IO (List (String × Option String))
     | _, [] => pure []
     | geet, f :: fs => do
-      pure $ (f.toString, ← getObjId geet f.toString) :: (← getFC geet fs)
+      pure $ (f.toString, ← Commands.getObjId geet f.toString (deref? := false)) :: (← getFC geet fs)
 
 -- parse a commit file.
 private def parseCommit (commit : ByteArray) : (String × Option String × String) :=
@@ -243,7 +274,7 @@ protected def catFile (obj : Option Hash.Obj := .none) (obj_fn : String) : IO Un
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
-  let .some id ← getObjId geet obj_fn
+  let .some id ← Commands.getObjId geet obj_fn
     | Log.err s!"failed to find hash {obj_fn}."
 
   let dir := geet / Init.objDir / id
@@ -311,7 +342,7 @@ protected partial def readTree (curr : FilePath) (treeHash : String) (geetDir : 
   ) | Log.err "failed to find .geet directory."
   let objDir := geet / Init.objDir
 
-  let .some id ← getObjId geet treeHash
+  let .some id ← Commands.getObjId geet treeHash
     | Log.err s!"failed to find file {treeHash}."
 
   let dir := geet / Init.objDir / id
@@ -344,13 +375,13 @@ protected def commitTree (dir : FilePath) (msg : String) : IO String := do
     | Log.err "failed to find .geet directory."
 
   let thash ← Commands.hashTree dir (geetDir := .some geet)
-  let prev ← readRef geet "HEAD"
+  let {symbolic? := _, value := prev } ← readRef geet "HEAD"
   let data :=
     match prev with
     | .none => s!"tree {thash}\n\n{msg}"
     | .some p => s!"tree {thash}\nparent {p}\n\n{msg}"
   let hash ← Hash.makeObjFile .commit geet data
-  setRef geet "HEAD" hash
+  setRef geet "HEAD" { symbolic? := false, value := .some hash }
   pure hash
 
 -- trace a commit and its parents, ensuring that no duplicates are followed.
@@ -370,49 +401,96 @@ protected def logCommits (start : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory."
 
-  let .some start ← getObjId geet start
+  let .some start ← Commands.getObjId geet start
     | Log.err s!"failed to find hash {start}."
 
   let commits ← Commands.followCommits [start] geet []
-  let logMsg : String := "\n\n".intercalate $ commits.map compose
+  let logMsg : String := "\n\n".intercalate $ commits.reverse.map compose
   IO.println logMsg
 where
-  compose (contents : String × String × Option String × String) : String :=
-    match contents.snd.snd.fst with
-    | .none   => s!"tree {contents.snd.fst}\n\n {contents.snd.snd.snd}"
-    | .some p => s!"tree {contents.snd.fst}\nparent {p}\n\n {contents.snd.snd.snd}"
+  compose : String × String × Option String × String → String
+    | (commit, tree, .none, msg)   => s!"commit {commit}\ntree   {tree}\n\n {msg}"
+    | (commit, tree, .some p, msg) => s!"commit {commit}\ntree   {tree}\nparent {p}\n\n {msg}"
+
+-- is given identifier a branch?
+private def isBranch? (branch : String) (geetDir : Option FilePath := .none) : IO Bool := do
+  let .some geet ← (
+    match geetDir with
+    | .some geet => pure $ .some geet
+    | .none => Init.geetDirExists?
+  ) | Log.err "failed to find .geet directory."
+
+  (FilePath.pathExists $ geet / Init.headsDir / branch).toIO
 
 -- revert the project to a specific commit
 protected def checkoutCommit (commit : String) : IO Unit := do
   let .some geet ← Init.geetDirExists?
     | Log.err "failed to find .geet directory"
 
-  let .some id ← getObjId geet commit
+  let .some id ← Commands.getObjId geet commit
     | Log.err s!"failed to find the commit {commit}."
 
-  setRef geet "HEAD" id
-  let (thash, _, _) ← Commands.getCommit (geetDir := geet) commit
+  let ref : RefValue :=
+    if (← isBranch? (geetDir := .some geet) commit)
+    then { symbolic? := true, value := .some s!"heads/{commit}" }
+    else { symbolic? := false, value := .some id};
+
+  setRef geet "HEAD" ref (deref? := .false)
+  let (thash, _, _) ← Commands.getCommit (geetDir := geet) id
 
   Commands.readTree (← IO.currentDir) thash (geetDir := .some geet)
   Log.info s!"successfully reverted to {if commit == "@" then "HEAD" else commit}."
 
+-- is the alias invalid?
+private def invalidAlias? (geet : FilePath) (alias : String) : IO Bool := do
+  let .false ← (FilePath.pathExists $ geet / Init.headsDir / alias).toIO
+    | pure .true
+
+  let .false ← (FilePath.pathExists $ geet / Init.tagDir / alias).toIO
+    | pure .true
+
+  pure $ alias == "HEAD"
+
 -- create a commit tag, given an alias and a commit hash
-protected def createTag (alias commit : String) : IO Unit :=
-  if h : alias ≠ "HEAD"
-  then aux alias commit h
-  else Log.err "alias cannot be HEAD."
-where
-  aux (alias commit : String) (_ : alias ≠ "HEAD") : IO Unit := do
-    let .some geet ← Init.geetDirExists?
-      | Log.err "failed to find .geet directory."
+protected def createTag (alias commit : String) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory."
 
-    let .false ← (FilePath.pathExists $ geet / Init.tagDir / alias).toIO
-      | Log.err "alias already exists."
+  unless not (← invalidAlias? geet alias) do
+    Log.err s!"invalid alias {alias}.";
 
-    let .some commitId ← getObjId geet commit
-      | Log.err s!"failed to find commit {commit}"
+  let .some commitId ← Commands.getObjId geet commit
+    | Log.err s!"failed to find commit {commit}"
 
-    setRef geet s!"tags/{alias}" commitId
-    Log.info s!"successfully added alias {alias}"
+  setRef geet s!"tags/{alias}" { symbolic? := false, value := .some commitId }
+  Log.info s!"successfully created tag {alias}"
+
+-- create a branch given a branch name and a commit to branch from.
+protected def createBranch (branch commit : String) : IO Unit := do
+  let .some geet ← Init.geetDirExists?
+    | Log.err "failed to find .geet directory."
+
+  unless not (← invalidAlias? geet branch) do
+    Log.err s!"invalid branch name {branch}.";
+
+  let .some commit ← Commands.getObjId geet commit
+    | Log.err s!"expected a commit hash."
+
+  -- NOTE: may or may not be an issue
+  IO.FS.writeFile (geet / Init.headsDir / branch) commit;
+  Log.info s!"successfully created branch {branch}";
+
+-- get the name of the current branch, or return nothing if detached.
+protected def getBranch? (geetDir : Option FilePath := .none) : IO (Option String) := do
+  let .some geet ← (
+    match geetDir with
+    | .some geet => pure $ .some geet
+    | .none => Init.geetDirExists?
+  ) | Log.err "failed to find .geet directory."
+
+  let hd ← readRef geet "HEAD" (deref? := false)
+  if not hd.symbolic?
+  then pure .none
+  else pure (FilePath.fileName hd.value.get!)
 
 end Commands

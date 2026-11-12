@@ -18,22 +18,21 @@ private def initCmd := `[Cli|
     pure 0
 
 private def hashBlobCmd := `[Cli|
-  hashblob VIA hashBlob;
-  "hash and store the given files."
+  hash VIA hash;
+  "hash and store the given file(s)."
 
   ARGS:
     ...hashes : String; "The hashes passed to the command."
 ] where
-  hashBlob (p : Parsed) : IO UInt32 := do
+  hash (p : Parsed) : IO UInt32 := do
     let fnames : Array String := p.variableArgsAs! String;
     for f in fnames do
       IO.println (← Commands.hashBlob $ .inl f)
 
     pure 0
 
--- TODO: remove the need to pass in the object type OR make it a flag to verify.
 private def catObjCmd := `[Cli|
-  catobj VIA catObj;
+  "cat-obj" VIA cat;
   "writes the contents of a hashed file to stdout."
 
   FLAGS:
@@ -42,14 +41,14 @@ private def catObjCmd := `[Cli|
   ARGS:
     hash    : String; "The hash/tag of the object being written to stdout."
 ] where
-  catObj (p : Parsed) : IO UInt32 := do
+  cat (p : Parsed) : IO UInt32 := do
     let obj : Option Hash.Obj := p.flag? "type" >>= pure ∘ Hash.Obj.ofString ∘ (·.as! String);
     let hash : String := p.positionalArg! "hash" |>.as! String;
     Commands.catFile (obj := obj) hash;
     pure 0
 
 private def hashTreeCmd := `[Cli|
-  hashtree VIA hashTree;
+  "hash-tree" VIA hashTree;
   "hash and store the cwd."
 ] where
   hashTree (_ : Parsed) : IO UInt32 := do
@@ -57,7 +56,7 @@ private def hashTreeCmd := `[Cli|
     pure 0
 
 private def writeTreeCmd := `[Cli|
-  writetree VIA writeTree;
+  "write-tree" VIA writeTree;
   "restore the project to the state stored in the given hash."
 
   ARGS:
@@ -104,16 +103,13 @@ private def logCmd := `[Cli|
 
 private def checkoutCmd := `[Cli|
   checkout VIA checkout;
-  "return the project to a specific commit; if no commit is given, it defaults to HEAD."
+  "checkout a specific branch of the project or return the project to a specific commit."
 
-  FLAGS:
-    c, commit : String; "the hash/tag of the commit that you want to return to."
+  ARGS:
+    commit : String; "the name of the branch or hash/tag of the commit that you want to return to."
 ] where
   checkout (p : Parsed) : IO UInt32 := do
-    let commit : String :=
-      match p.flag? "commit" with
-      | .some f => f.as! String
-      | .none => "@";
+    let commit : String := p.positionalArg! "commit" |>.as! String;
     Commands.checkoutCommit commit;
     pure 0
 
@@ -125,7 +121,7 @@ private def tagCmd := `[Cli|
     c, commit : String; "the commit that you want to alias."
 
   ARGS:
-    alias  : String; "the name that you'll alias the commit to."
+    alias : String; "the name that you'll alias the commit to."
 ] where
   tag (p : Parsed) : IO UInt32 := do
     let alias : String := p.positionalArg! "alias" |>.as! String;
@@ -170,6 +166,41 @@ private partial def kCmd := `[Cli|
         let p := s!"\"{oid}\" -> \"{p}\"\n";
         connectCommits comms (acc ++ p)
 
+private partial def branchCmd := `[Cli|
+  branch VIA branch;
+  "create a branch in the project history."
+
+  FLAGS:
+    s, start : String; "the commit that you want to branch from; defaults to HEAD."
+
+  ARGS:
+    alias : String; "the name that you want to give the branch."
+] where
+  branch (p : Parsed) : IO UInt32 := do
+    let alias : String := p.positionalArg! "alias" |>.as! String;
+    let start : String :=
+      match p.flag? "start" with
+      | .none   => "@"
+      | .some s => s.as! String;
+
+    Commands.createBranch alias start;
+    pure 0
+
+private partial def statusCmd := `[Cli|
+  status VIA status;
+  "report the status of the project."
+] where
+  status (_ : Parsed) : IO UInt32 := do
+    let .some geet ← Init.geetDirExists?
+      | Log.err "failed to find .geet directory."
+
+    let head ← Commands.getObjId geet "@"
+    match ← Commands.getBranch? (geetDir := geet) with
+    | .none   => IO.println s!"HEAD detached at {head}"
+    | .some b => IO.println s!"On branch {b}"
+
+    pure 0
+
 protected def geet : Cmd := `[Cli|
   geet NOOP;
   "a cool VC thing"
@@ -184,7 +215,9 @@ protected def geet : Cmd := `[Cli|
     logCmd;
     checkoutCmd;
     tagCmd;
-    kCmd
+    kCmd;
+    branchCmd;
+    statusCmd
 ]
 
 end Cli
