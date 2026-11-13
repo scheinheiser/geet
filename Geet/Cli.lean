@@ -91,12 +91,12 @@ private def logCmd := `[Cli|
 
   FLAGS:
     s, start : String; "provide a hash/tag to see the tree from a specific point."
+
+  EXTENSIONS:
+    defaultValues! #[("start", "@")]
 ] where
   log (p : Parsed) : IO UInt32 := do
-    let start : String :=
-      match p.flag? "start" with
-      | .none => "@"
-      | .some f => f.as! String
+    let start : String := p.flag! "start" |>.as! String;
 
     Commands.logCommits start;
     pure 0
@@ -113,8 +113,8 @@ private def checkoutCmd := `[Cli|
     Commands.checkoutCommit commit;
     pure 0
 
-private def tagCmd := `[Cli|
-  tag VIA tag;
+private def tagAddCmd := `[Cli|
+  add VIA tagAdd;
   "alias a specific commit to a name; if no commit is given, it defaults to HEAD."
 
   FLAGS:
@@ -122,14 +122,34 @@ private def tagCmd := `[Cli|
 
   ARGS:
     alias : String; "the name that you'll alias the commit to."
+
+  EXTENSIONS:
+    defaultValues! #[("commit", "@")]
 ] where
-  tag (p : Parsed) : IO UInt32 := do
+  tagAdd (p : Parsed) : IO UInt32 := do
     let alias : String := p.positionalArg! "alias" |>.as! String;
-    let commit : String :=
-      match p.flag? "commit" with
-      | .none => "@"
-      | .some p => p.as! String;
+    let commit : String := p.flag! "commit" |>.as! String;
+
     Commands.createTag alias commit;
+    pure 0
+
+private def tagCmd := `[Cli|
+  tag VIA tag;
+  "create a new tag or view all tags."
+
+  FLAGS:
+    l, list; "list all tags."
+
+  SUBCOMMANDS:
+    tagAddCmd
+] where
+  name (fp : String) : String := (fp.splitOn (sep := "/")).getLast!
+
+  tag (p : Parsed) : IO UInt32 := do
+    unless not $ p.hasFlag "list" do
+      for (r, h) in ← Commands.walkRefs (pre := ".geet/refs/tags") do
+          IO.println s!"{name r} → {h.get!}"
+
     pure 0
 
 private partial def kCmd := `[Cli|
@@ -166,24 +186,52 @@ private partial def kCmd := `[Cli|
         let p := s!"\"{oid}\" -> \"{p}\"\n";
         connectCommits comms (acc ++ p)
 
-private partial def branchCmd := `[Cli|
-  branch VIA branch;
+private partial def branchAddCmd := `[Cli|
+  add VIA branchAdd;
   "create a branch in the project history."
 
   FLAGS:
-    s, start : String; "the commit that you want to branch from; defaults to HEAD."
+    s, start : String; "the commit that you want to brach from; defaults to HEAD."
 
   ARGS:
-    alias : String; "the name that you want to give the branch."
+    alias : String; "the branch name."
+
+  EXTENSIONS:
+    defaultValues! #[("start", "@")]
 ] where
-  branch (p : Parsed) : IO UInt32 := do
+  branchAdd (p : Parsed) : IO UInt32 := do
     let alias : String := p.positionalArg! "alias" |>.as! String;
-    let start : String :=
-      match p.flag? "start" with
-      | .none   => "@"
-      | .some s => s.as! String;
+    let start : String := p.flag! "start" |>.as! String;
 
     Commands.createBranch alias start;
+    pure 0
+
+-- TODO: make subcommands for branch! list to see branches, add to make a new branch
+-- do the same for tag too!
+private partial def branchCmd := `[Cli|
+  branch VIA branch;
+  "create a branch in the project history or view all branches."
+
+  FLAGS:
+    l, list; "list all branches in the project history."
+
+  SUBCOMMANDS:
+    branchAddCmd
+] where
+  name (fp : String) : String := (fp.splitOn (sep := "/")).getLast!
+
+  branch (p : Parsed) : IO UInt32 := do
+    unless not $ p.hasFlag "list" do
+      let .some geet ← Init.geetDirExists?
+        | Log.err "failed to find .geet directory."
+
+      let curr := (← Commands.getBranch? (geetDir := .some geet)).getD ""
+      for (r, _) in ← Commands.walkRefs (geetDir := .some geet) (pre := ".geet/refs/heads") do
+        let r := name r;
+        if r == curr
+        then IO.println s!"* {r}"
+        else IO.println s!"  {r}"
+
     pure 0
 
 private partial def statusCmd := `[Cli|

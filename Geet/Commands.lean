@@ -180,24 +180,24 @@ where
       | _ => unreachable!
 
 -- traverse the ref directory, and return the ref filepath with the possible commit hash.
-protected partial def walkRefs (geetDir : Option FilePath := .none) : IO (List (String × Option String)) := do
+protected partial def walkRefs (geetDir : Option FilePath := .none) (pre : String := "") : IO (List (String × Option String)) := do
   let .some geet ← (
     match geetDir with
     | .some geet => pure $ .some geet
     | .none => Init.geetDirExists?
   ) | Log.err "failed to find .geet directory."
 
-  let refs ← getFiles [] $ geet / Init.refDir
+  let refs ← getFiles [] (geet / pre).toString $ geet / Init.refDir
   getFC geet refs
 where
-  getFiles (refs : List FilePath) (curr : FilePath) : IO (List FilePath) := do
+  getFiles (refs : List FilePath) (pre : String) (curr : FilePath) : IO (List FilePath) := do
     let mut currRefs : List FilePath := []
     for e in (← FilePath.readDir curr) do
       let file? := e.path
-      let .true ← (FilePath.isDir file?).toIO
-        | currRefs := file? :: currRefs
+      let .true ← file?.isDir
+        | currRefs := if file?.toString.startsWith pre then file? :: currRefs else currRefs
 
-      currRefs := (← getFiles refs file?) ++ currRefs
+      currRefs := (← getFiles refs pre file?) ++ currRefs
 
     pure $ currRefs ++ refs
 
@@ -431,7 +431,7 @@ protected def createTag (alias commit : String) : IO Unit := do
   let .some commitId ← Commands.getObjId geet commit
     | Log.err s!"failed to find commit {commit}"
 
-  setRef geet s!"tags/{alias}" { symbolic? := false, value := .some commitId }
+  IO.FS.writeFile (geet / Init.tagDir / alias) commitId;
   Log.info s!"successfully created tag {alias}"
 
 -- create a branch given a branch name and a commit to branch from.
@@ -440,7 +440,7 @@ protected def createBranch (branch commit : String) : IO Unit := do
     | Log.err "failed to find .geet directory."
 
   unless not (← invalidAlias? geet branch) do
-    Log.err s!"invalid branch name {branch}.";
+    Log.err s!"invalid branch name '{branch}'.";
 
   let .some commit ← Commands.getObjId geet commit
     | Log.err s!"expected a commit hash."
